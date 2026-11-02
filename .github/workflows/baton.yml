@@ -1,0 +1,74 @@
+# Reconcile baton.yml with a released baton, the way a project's
+# <project>-baton repo would. Adapted from
+# https://github.com/uwu-tools/baton/tree/main/templates/workflows.
+#
+# Demo differences from the template:
+# - Issues go to the uwu-tests org via --redirect-owner, never to the
+#   real component repos.
+# - It authenticates with the BATON_TOKEN environment secret instead of
+#   a GitHub App token.
+# - It runs daily, accepts repository_dispatch to exercise the event
+#   path, and takes a `version` input so unreleased baton (a branch or
+#   commit) can be tried before a release.
+---
+name: baton
+
+on:
+  schedule:
+    - cron: "23 7 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: baton version, branch, or commit to run (default the pinned release)
+        required: false
+        default: ""
+  repository_dispatch:
+    types: [baton-reconcile]
+
+permissions: {}
+
+concurrency:
+  group: baton
+  cancel-in-progress: false
+
+env:
+  BATON_VERSION: v0.1.0
+
+jobs:
+  reconcile:
+    name: Reconcile
+    runs-on: ubuntu-latest
+    # BATON_TOKEN is an environment secret, so only this job can read it.
+    environment: baton
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27"
+          cache: false
+      - name: Record trigger
+        env:
+          EVENT: ${{ github.event_name }}
+          SOURCE: ${{ github.event.client_payload.source }}
+          VERSION: ${{ github.event.client_payload.version }}
+        run: echo "trigger=${EVENT} source=${SOURCE:-n/a} version=${VERSION:-n/a}"
+      - name: Reconcile
+        env:
+          # Fine-grained token: Issues read/write on the uwu-tests repos.
+          # Public component repos are readable with any token.
+          GITHUB_TOKEN: ${{ secrets.BATON_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+        # go run verifies the module against the Go checksum database.
+        run: |
+          version="${INPUT_VERSION:-$BATON_VERSION}"
+          if [[ ! "$version" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "invalid version: $version" >&2
+            exit 1
+          fi
+          echo "baton@${version}"
+          go run "github.com/uwu-tools/baton/cmd/baton@${version}" \
+            apply --redirect-owner uwu-tests baton.yml
